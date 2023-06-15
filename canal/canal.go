@@ -497,9 +497,13 @@ func (c *Canal) SyncedGTIDSet() mysql.GTIDSet {
 	return c.master.GTIDSet()
 }
 
-func (c *Canal) AddIncludeTableRegex(tableRegex *regexp.Regexp) bool {
+func (c *Canal) AddIncludeTableRegex(key string, tableRegex *regexp.Regexp) bool {
 	c.includeTableRegexLock.Lock()
 	c.includeTableRegex = append(c.includeTableRegex, tableRegex)
+	_, ok := c.tableMatchCache[key]
+	if ok {
+		delete(c.tableMatchCache, key)
+	}
 	c.includeTableRegexLock.Unlock()
 	return true
 }
