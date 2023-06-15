@@ -44,9 +44,10 @@ type Canal struct {
 	tables             map[string]*schema.Table
 	errorTablesGetTime map[string]time.Time
 
-	tableMatchCache   map[string]bool
-	includeTableRegex []*regexp.Regexp
-	excludeTableRegex []*regexp.Regexp
+	tableMatchCache       map[string]bool
+	includeTableRegexLock sync.RWMutex
+	includeTableRegex     []*regexp.Regexp
+	excludeTableRegex     []*regexp.Regexp
 
 	delay *uint32
 
@@ -494,4 +495,11 @@ func (c *Canal) SyncedTimestamp() uint32 {
 
 func (c *Canal) SyncedGTIDSet() mysql.GTIDSet {
 	return c.master.GTIDSet()
+}
+
+func (c *Canal) AddIncludeTableRegex(tableRegex *regexp.Regexp) bool {
+	c.includeTableRegexLock.Lock()
+	c.includeTableRegex = append(c.includeTableRegex, tableRegex)
+	c.includeTableRegexLock.Unlock()
+	return true
 }
