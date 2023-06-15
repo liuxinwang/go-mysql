@@ -501,7 +501,7 @@ func (c *Canal) AddIncludeTableRegex(key string, tableRegex *regexp.Regexp) (boo
 	c.includeTableRegexLock.Lock()
 	defer c.includeTableRegexLock.Unlock()
 	for _, regex := range c.includeTableRegex {
-		if regex == tableRegex {
+		if regex.String() == tableRegex.String() {
 			return false, errors.New("table rule already exists.")
 		}
 	}
