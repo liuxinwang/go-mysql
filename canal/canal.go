@@ -497,13 +497,39 @@ func (c *Canal) SyncedGTIDSet() mysql.GTIDSet {
 	return c.master.GTIDSet()
 }
 
-func (c *Canal) AddIncludeTableRegex(key string, tableRegex *regexp.Regexp) bool {
+func (c *Canal) AddIncludeTableRegex(key string, tableRegex *regexp.Regexp) (bool, error) {
 	c.includeTableRegexLock.Lock()
+	defer c.includeTableRegexLock.Unlock()
+	for _, regex := range c.includeTableRegex {
+		if regex == tableRegex {
+			return false, errors.New("table rule already exists.")
+		}
+	}
 	c.includeTableRegex = append(c.includeTableRegex, tableRegex)
 	_, ok := c.tableMatchCache[key]
 	if ok {
 		delete(c.tableMatchCache, key)
 	}
-	c.includeTableRegexLock.Unlock()
-	return true
+	return true, nil
+}
+
+func (c *Canal) DelIncludeTableRegex(key string, tableRegex *regexp.Regexp) (bool, error) {
+	c.includeTableRegexLock.Lock()
+	defer c.includeTableRegexLock.Unlock()
+	for i, regex := range c.includeTableRegex {
+		if regex.String() == tableRegex.String() {
+			c.includeTableRegex = append(c.includeTableRegex[:i], c.includeTableRegex[i+1:]...)
+			_, ok := c.tableMatchCache[key]
+			if ok {
+				c.tableMatchCache[key] = false
+			}
+			return true, nil
+		}
+	}
+	return false, errors.New("table rule not exists.")
+}
+
+func (c *Canal) GetIncludeTableRegex() []*regexp.Regexp {
+	includeTableRegex := c.includeTableRegex
+	return includeTableRegex
 }
