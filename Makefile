@@ -11,7 +11,7 @@ build:
 test:
 	go test --race -timeout 2m ./...
 
-MYSQL_VERSION ?= 5.7
+MYSQL_VERSION ?= 8.0
 test-local:
 	docker run --rm -d --network=host --name go-mysql-server \
 		-e MYSQL_ALLOW_EMPTY_PASSWORD=true \
@@ -19,7 +19,7 @@ test-local:
 		-v $${PWD}/docker/resources/replication.cnf:/etc/mysql/conf.d/replication.cnf \
 		mysql:$(MYSQL_VERSION)
 	docker/resources/waitfor.sh 127.0.0.1 3306 \
-		&& go test -race -v -timeout 2m ./... -gocheck.v
+		&& go test -race -v -timeout 2m ./...
 	docker stop go-mysql-server
 
 fmt:

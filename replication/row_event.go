@@ -81,6 +81,11 @@ type TableMapEvent struct {
 	// EnumSetDefaultCharset/EnumSetColumnCharset is similar to DefaultCharset/ColumnCharset but for enum/set columns.
 	EnumSetDefaultCharset []uint64
 	EnumSetColumnCharset  []uint64
+
+	// VisibilityBitmap stores bits that are set if corresponding column is not invisible (MySQL 8.0.23+)
+	VisibilityBitmap []byte
+
+	optionalMetaDecodeFunc func(data []byte) (err error)
 }
 
 func (e *TableMapEvent) Decode(data []byte) error {
@@ -137,8 +142,14 @@ func (e *TableMapEvent) Decode(data []byte) error {
 
 	pos += nullBitmapSize
 
-	if err = e.decodeOptionalMeta(data[pos:]); err != nil {
-		return err
+	if e.optionalMetaDecodeFunc != nil {
+		if err = e.optionalMetaDecodeFunc(data[pos:]); err != nil {
+			return err
+		}
+	} else {
+		if err = e.decodeOptionalMeta(data[pos:]); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -312,6 +323,9 @@ func (e *TableMapEvent) decodeOptionalMeta(data []byte) (err error) {
 				return err
 			}
 
+		case TABLE_MAP_OPT_META_COLUMN_VISIBILITY:
+			e.VisibilityBitmap = v
+
 		default:
 			// Ignore for future extension
 		}
@@ -421,6 +435,7 @@ func (e *TableMapEvent) Dump(w io.Writer) {
 	fmt.Fprintf(w, "Primary key prefix: %v\n", e.PrimaryKeyPrefix)
 	fmt.Fprintf(w, "Enum/set default charset: %v\n", e.EnumSetDefaultCharset)
 	fmt.Fprintf(w, "Enum/set column charset: %v\n", e.EnumSetColumnCharset)
+	fmt.Fprintf(w, "Invisible Column bitmap: \n%s", hex.Dump(e.VisibilityBitmap))
 
 	unsignedMap := e.UnsignedMap()
 	fmt.Fprintf(w, "UnsignedMap: %#v\n", unsignedMap)
@@ -439,6 +454,9 @@ func (e *TableMapEvent) Dump(w io.Writer) {
 
 	geometryTypeMap := e.GeometryTypeMap()
 	fmt.Fprintf(w, "GeometryTypeMap: %#v\n", geometryTypeMap)
+
+	visibilityMap := e.VisibilityMap()
+	fmt.Fprintf(w, "VisibilityMap: %#v\n", visibilityMap)
 
 	nameMaxLen := 0
 	for _, name := range e.ColumnName {
@@ -552,12 +570,9 @@ func (e *TableMapEvent) SetStrValueString() [][]string {
 		if len(e.SetStrValue) == 0 {
 			return nil
 		}
-		e.setStrValueString = make([][]string, 0, len(e.SetStrValue))
-		for _, vals := range e.SetStrValue {
-			e.setStrValueString = append(
-				e.setStrValueString,
-				e.bytesSlice2StrSlice(vals),
-			)
+		e.setStrValueString = make([][]string, len(e.SetStrValue))
+		for i, vals := range e.SetStrValue {
+			e.setStrValueString[i] = e.bytesSlice2StrSlice(vals)
 		}
 	}
 	return e.setStrValueString
@@ -570,12 +585,9 @@ func (e *TableMapEvent) EnumStrValueString() [][]string {
 		if len(e.EnumStrValue) == 0 {
 			return nil
 		}
-		e.enumStrValueString = make([][]string, 0, len(e.EnumStrValue))
-		for _, vals := range e.EnumStrValue {
-			e.enumStrValueString = append(
-				e.enumStrValueString,
-				e.bytesSlice2StrSlice(vals),
-			)
+		e.enumStrValueString = make([][]string, len(e.EnumStrValue))
+		for i, vals := range e.EnumStrValue {
+			e.enumStrValueString[i] = e.bytesSlice2StrSlice(vals)
 		}
 	}
 	return e.enumStrValueString
@@ -594,9 +606,9 @@ func (e *TableMapEvent) bytesSlice2StrSlice(src [][]byte) []string {
 	if src == nil {
 		return nil
 	}
-	ret := make([]string, 0, len(src))
-	for _, item := range src {
-		ret = append(ret, string(item))
+	ret := make([]string, len(src))
+	for i, item := range src {
+		ret[i] = string(item)
 	}
 	return ret
 }
@@ -608,14 +620,19 @@ func (e *TableMapEvent) UnsignedMap() map[int]bool {
 	if len(e.SignednessBitmap) == 0 {
 		return nil
 	}
-	p := 0
 	ret := make(map[int]bool)
-	for i := 0; i < int(e.ColumnCount); i++ {
-		if !e.IsNumericColumn(i) {
-			continue
+	i := 0
+	for _, field := range e.SignednessBitmap {
+		for c := 0x80; c != 0; {
+			if e.IsNumericColumn(i) {
+				ret[i] = field&byte(c) != 0
+				c >>= 1
+			}
+			i++
+			if i >= int(e.ColumnCount) {
+				return ret
+			}
 		}
-		ret[i] = e.SignednessBitmap[p/8]&(1<<uint(7-p%8)) != 0
-		p++
 	}
 	return ret
 }
@@ -730,6 +747,27 @@ func (e *TableMapEvent) GeometryTypeMap() map[int]uint64 {
 	return ret
 }
 
+// VisibilityMap returns a map: column index -> visiblity.
+// Invisible column was introduced in MySQL 8.0.23
+// nil is returned if not available.
+func (e *TableMapEvent) VisibilityMap() map[int]bool {
+	if len(e.VisibilityBitmap) == 0 {
+		return nil
+	}
+	ret := make(map[int]bool)
+	i := 0
+	for _, field := range e.VisibilityBitmap {
+		for c := 0x80; c != 0; c >>= 1 {
+			ret[i] = field&byte(c) != 0
+			i++
+			if uint64(i) >= e.ColumnCount {
+				return ret
+			}
+		}
+	}
+	return ret
+}
+
 // Below realType and IsXXXColumn are base from:
 //   table_def::type in sql/rpl_utility.h
 //   Table_map_log_event::print_columns in mysql-8.0/sql/log_event.cc and mariadb-10.5/sql/log_event_client.cc
@@ -822,6 +860,36 @@ func (e *TableMapEvent) JsonColumnCount() uint64 {
 // RowsEventStmtEndFlag is set in the end of the statement.
 const RowsEventStmtEndFlag = 0x01
 
+// RowsEvent represents a MySQL rows event like DELETE_ROWS_EVENT,
+// UPDATE_ROWS_EVENT, etc.
+// RowsEvent.Rows saves the rows data, and the MySQL type to golang type mapping
+// is
+// - MYSQL_TYPE_NULL: nil
+// - MYSQL_TYPE_LONG: int32
+// - MYSQL_TYPE_TINY: int8
+// - MYSQL_TYPE_SHORT: int16
+// - MYSQL_TYPE_INT24: int32
+// - MYSQL_TYPE_LONGLONG: int64
+// - MYSQL_TYPE_NEWDECIMAL: string / "github.com/shopspring/decimal".Decimal
+// - MYSQL_TYPE_FLOAT: float32
+// - MYSQL_TYPE_DOUBLE: float64
+// - MYSQL_TYPE_BIT: int64
+// - MYSQL_TYPE_TIMESTAMP: string / time.Time
+// - MYSQL_TYPE_TIMESTAMP2: string / time.Time
+// - MYSQL_TYPE_DATETIME: string / time.Time
+// - MYSQL_TYPE_DATETIME2: string / time.Time
+// - MYSQL_TYPE_TIME: string
+// - MYSQL_TYPE_TIME2: string
+// - MYSQL_TYPE_DATE: string
+// - MYSQL_TYPE_YEAR: int
+// - MYSQL_TYPE_ENUM: int64
+// - MYSQL_TYPE_SET: int64
+// - MYSQL_TYPE_BLOB: []byte
+// - MYSQL_TYPE_VARCHAR: string
+// - MYSQL_TYPE_VAR_STRING: string
+// - MYSQL_TYPE_STRING: string
+// - MYSQL_TYPE_JSON: []byte / *replication.JsonDiff
+// - MYSQL_TYPE_GEOMETRY: []byte
 type RowsEvent struct {
 	// 0, 1, 2
 	Version int
@@ -842,7 +910,12 @@ type RowsEvent struct {
 	Flags uint16
 
 	// if version == 2
-	ExtraData []byte
+	// Use when DataLen value is greater than 2
+	NdbFormat byte
+	NdbData   []byte
+
+	PartitionId       uint16
+	SourcePartitionId uint16
 
 	// lenenc_int
 	ColumnCount uint64
@@ -919,8 +992,12 @@ func (e *RowsEvent) DecodeHeader(data []byte) (int, error) {
 	if e.Version == 2 {
 		dataLen := binary.LittleEndian.Uint16(data[pos:])
 		pos += 2
-
-		e.ExtraData = data[pos : pos+int(dataLen-2)]
+		if dataLen > 2 {
+			err := e.decodeExtraData(data[pos:])
+			if err != nil {
+				return 0, err
+			}
+		}
 		pos += int(dataLen - 2)
 	}
 
@@ -949,7 +1026,38 @@ func (e *RowsEvent) DecodeHeader(data []byte) (int, error) {
 	return pos, nil
 }
 
+func (e *RowsEvent) decodeExtraData(data []byte) (err2 error) {
+	pos := 0
+	extraDataType := data[pos]
+	pos += 1
+	switch extraDataType {
+	case ENUM_EXTRA_ROW_INFO_TYPECODE_NDB:
+		var ndbLength int = int(data[pos])
+		pos += 1
+		e.NdbFormat = data[pos]
+		pos += 1
+		e.NdbData = data[pos : pos+ndbLength-2]
+	case ENUM_EXTRA_ROW_INFO_TYPECODE_PARTITION:
+		if e.eventType == UPDATE_ROWS_EVENTv1 || e.eventType == UPDATE_ROWS_EVENTv2 || e.eventType == PARTIAL_UPDATE_ROWS_EVENT {
+			e.PartitionId = binary.LittleEndian.Uint16(data[pos:])
+			pos += 2
+			e.SourcePartitionId = binary.LittleEndian.Uint16(data[pos:])
+		} else {
+			e.PartitionId = binary.LittleEndian.Uint16(data[pos:])
+		}
+	}
+	return nil
+}
+
 func (e *RowsEvent) DecodeData(pos int, data []byte) (err2 error) {
+	if e.compressed {
+		data, err2 = DecompressMariadbData(data[pos:])
+		if err2 != nil {
+			//nolint:nakedret
+			return
+		}
+	}
+
 	// Rows_log_event::print_verbose()
 
 	var (
@@ -1004,13 +1112,6 @@ func (e *RowsEvent) Decode(data []byte) error {
 	pos, err := e.DecodeHeader(data)
 	if err != nil {
 		return err
-	}
-	if e.compressed {
-		uncompressedData, err := DecompressMariadbData(data[pos:])
-		if err != nil {
-			return err
-		}
-		return e.DecodeData(0, uncompressedData)
 	}
 	return e.DecodeData(pos, data)
 }
@@ -1706,6 +1807,7 @@ func (e *RowsEvent) Dump(w io.Writer) {
 	fmt.Fprintf(w, "TableID: %d\n", e.TableID)
 	fmt.Fprintf(w, "Flags: %d\n", e.Flags)
 	fmt.Fprintf(w, "Column count: %d\n", e.ColumnCount)
+	fmt.Fprintf(w, "NDB data: %s\n", e.NdbData)
 
 	fmt.Fprintf(w, "Values:\n")
 	for _, rows := range e.Rows {

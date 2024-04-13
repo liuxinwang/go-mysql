@@ -225,18 +225,18 @@ type PreviousGTIDsEvent struct {
 }
 
 func (e *PreviousGTIDsEvent) Decode(data []byte) error {
-	var previousGTIDSets []string
 	pos := 0
 	uuidCount := binary.LittleEndian.Uint16(data[pos : pos+8])
 	pos += 8
 
-	for i := uint16(0); i < uuidCount; i++ {
+	previousGTIDSets := make([]string, uuidCount)
+	for i := range previousGTIDSets {
 		uuid := e.decodeUuid(data[pos : pos+16])
 		pos += 16
 		sliceCount := binary.LittleEndian.Uint16(data[pos : pos+8])
 		pos += 8
-		var intervals []string
-		for i := uint16(0); i < sliceCount; i++ {
+		intervals := make([]string, sliceCount)
+		for i := range intervals {
 			start := e.decodeInterval(data[pos : pos+8])
 			pos += 8
 			stop := e.decodeInterval(data[pos : pos+8])
@@ -247,9 +247,9 @@ func (e *PreviousGTIDsEvent) Decode(data []byte) error {
 			} else {
 				interval = fmt.Sprintf("%d-%d", start, stop-1)
 			}
-			intervals = append(intervals, interval)
+			intervals[i] = interval
 		}
-		previousGTIDSets = append(previousGTIDSets, fmt.Sprintf("%s:%s", uuid, strings.Join(intervals, ":")))
+		previousGTIDSets[i] = fmt.Sprintf("%s:%s", uuid, strings.Join(intervals, ":"))
 	}
 	e.GTIDSets = strings.Join(previousGTIDSets, ",")
 	return nil
@@ -462,6 +462,14 @@ func (e *GTIDEvent) Dump(w io.Writer) {
 	fmt.Fprintln(w)
 }
 
+func (e *GTIDEvent) GTIDNext() (GTIDSet, error) {
+	u, err := uuid.FromBytes(e.SID)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMysqlGTIDSet(strings.Join([]string{u.String(), strconv.FormatInt(e.GNO, 10)}, ":"))
+}
+
 // ImmediateCommitTime returns the commit time of this trx on the immediate server
 // or zero time if not available.
 func (e *GTIDEvent) ImmediateCommitTime() time.Time {
@@ -623,6 +631,10 @@ func (e *MariadbGTIDEvent) Dump(w io.Writer) {
 	fmt.Fprintf(w, "Flags: %v\n", e.Flags)
 	fmt.Fprintf(w, "CommitID: %v\n", e.CommitID)
 	fmt.Fprintln(w)
+}
+
+func (e *MariadbGTIDEvent) GTIDNext() (GTIDSet, error) {
+	return ParseMariadbGTIDSet(e.GTID.String())
 }
 
 type MariadbGTIDListEvent struct {
